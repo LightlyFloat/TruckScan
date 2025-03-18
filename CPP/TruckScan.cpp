@@ -3,6 +3,9 @@
 
 
 
+#include <windows.h>
+#include <process.h>
+#include <iostream>
 #include <thread>//包含线程库
 #include "easylogging++.h"//包含Easylogging++库
 #include "Crane.h"//包含卸船机类
