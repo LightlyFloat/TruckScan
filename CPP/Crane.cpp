@@ -1,203 +1,239 @@
-#define MAX_BUFF_SIZE 16384
-#define MAX_REC_NUM 10
-#define _USE_MATH_DEFINES
-#include <WS2tcpip.h>
-#include <cmath>
-#include <vector>
-#include "Crane.h"
-#include "easylogging++.h"
+// --- 预处理指令 (Preprocessor Directives) ---
+
+#define MAX_BUFF_SIZE 16384  // 定义最大缓冲区大小
+#define MAX_REC_NUM 10      // 定义最大记录数
+#define _USE_MATH_DEFINES   // 启用 <cmath> 中数学常量定义
+#include <WS2tcpip.h>      // 网络通信相关
+#include <cmath>           // 数学函数，包含 C++ 标准数学库头文件，提供数学运算功能
+#include <vector>          // STL向量容器，提供动态数组功能
+#include "Crane.h"         // 卸船机类头文件
+#include "easylogging++.h" // 日志系统
 
 
-using namespace std;
-using namespace el;
-#pragma comment(lib,"ws2_32.lib")
+using namespace std;//命名空间，标准库
+using namespace el;//命名空间，日志系统
+#pragma comment(lib,"ws2_32.lib")//链接库
 
-Crane::Crane(const char* Scan, const char* RFID, const char* PLC, const char* Forklift, int ScanType, unsigned char No,int Range, CDBConnetPool& DBPool) :DB(DBPool)
+// 定义了当一台新的 `Crane` (卸船机控制程序实例) 被创建时，需要做哪些初始化工作。记下各种设备的网络地址 (IP 地址)、这台卸船机自己的编号、用的是哪种扫描仪等等，并尝试和 PLC、扫描仪建立第一次连接。
+Crane::Crane(const char* Scan, const char* RFID, const char* PLC, const char* Forklift,// 参数: Scan, RFID, PLC, Forklift 的IP地址 (C风格字符串), 扫描仪类型, 卸船机编号, 工作范围, 数据库连接池对象引用
+             int ScanType, unsigned char No, int Range, CDBConnetPool& DBPool) :DB(DBPool)
 {
-    strcpy_s(ipRFID, RFID);
-    strcpy_s(ipPLC, PLC);
-    strcpy_s(ipForklift, Forklift);
-    iScanType = ScanType;
-    lastTime = time(NULL) - 5;
-    CraneNo = No;
-    iRange = Range;
-    ::memset(truckRFID, 0, sizeof(truckRFID));
-    ::memset(truckLocation, 0, sizeof(truckLocation));
-    ::memset(forkliftRFID, 0, sizeof(forkliftRFID));
-    ::memset(&serverAddr, 0, sizeof(serverAddr));
-    
-    if (iScanType == 1)
-    {
-        serverAddr.sin_family = AF_INET;
-        serverAddr.sin_port = htons(2111);
-        inet_pton(AF_INET, Scan, &serverAddr.sin_addr);
+    // 初始化IP地址 (记录下其他设备的网络地址)
+    strcpy_s(ipRFID, RFID);        // 将传入的RFID读取器IP地址复制到类的成员变量 ipRFID 中
+    strcpy_s(ipPLC, PLC);          // 将传入的PLC控制器IP地址复制到类的成员变量 ipPLC 中
+    strcpy_s(ipForklift, Forklift); // 将传入的叉车相关设备IP地址复制到类的成员变量 ipForklift 中
+
+    iScanType = ScanType;          // 记下用的是哪种类型的扫描仪，将传入的扫描仪类型赋值给成员变量 iScanType
+    lastTime = time(NULL) - 5;     // 初始化一个时间戳，获取当前时间戳，减去5秒，赋值给成员变量 lastTime
+    CraneNo = No;                  // 记下这台卸船机自己的编号，将传入的卸船机编号赋值给成员变量 CraneNo
+    iRange = Range;                // 记下工作范围相关的设置，将传入的工作范围参数赋值给成员变量 iRange
+
+    // 初始化各种缓冲区 (准备好一些空白的“记录本”或“内存空间”)
+    ::memset(truckRFID, 0, sizeof(truckRFID));       // 清空记录卡车ID的地方
+    ::memset(truckLocation, 0, sizeof(truckLocation)); // 清空记录卡车位置的地方
+    ::memset(forkliftRFID, 0, sizeof(forkliftRFID)); // 清空记录叉车ID的地方
+
+    // 配置扫描仪网络连接 (根据扫描仪类型，设置好和它“说话”的方式)
+    if (iScanType == 1) {  // 如果是 SICK LMS511 扫描仪
+        serverAddr.sin_port = htons(2111); // 设置端口号为 2111
     }
-    else if (iScanType == 2)
-    {
-        serverAddr.sin_family = AF_INET;
-        serverAddr.sin_port = htons(65530);
-        inet_pton(AF_INET, Scan, &serverAddr.sin_addr);
-    }    
-    plc.ConnectTo(ipPLC, 0, 1);
-    iState = ConnectScan();
+    else if (iScanType == 2) {  // 如果是 XXWXTL302 扫描仪
+        serverAddr.sin_port = htons(65530); // 设置端口号为 65530
+    }
+
+    // 连接PLC和扫描仪 (尝试和PLC、扫描仪建立联系)
+    plc.ConnectTo(ipPLC, 0, 1); // 尝试连接PLC
+    iState = ConnectScan();      // 调用本类的 ConnectScan 方法尝试连接扫描仪，并记录保存连接状态，将返回的连接状态在状态变量 `iState` 中。
 }
 
-Crane::~Crane() 
+//当这个卸船机控制程序实例不再需要，准备结束时，这段代码负责清理工作。
+Crane::~Crane()
 {
     if (plc.Connected())
-        plc.Disconnect();
-    closesocket(client);
+        plc.Disconnect();    // 如果还连着PLC，则调用 plc 对象的 Disconnect 方法断开与PLC的连接
+    closesocket(client);     // 调用 closesocket 函数关闭与扫描仪连接的套接字 (client 是套接字句柄)
 }
 
+// 在卸船机开始新一轮工作前，把所有工作状态标志&状态参数(比如当前在做什么、抓了多少次、有没有故障等)都设回初始值
 int Crane::Init()
 {
-    cout << "开始新一轮的扫描" << endl;
-    //CraneNo = 0;//卸船机号
-    CraneState = 0;//卸船机状态：0、无作业；1、卸船；2、装船
-    HopPos = 0;//料斗位置
-    GrabNum = 0;//已放料数量
-
-    HearBeat = 0;//心跳信号
-    Fault = 1;//故障
-    Pause = 0;//暂停
-    TruckHave = 0;//当前卸船机是否有卡车。0、无车；1、有车
-    UnloadPermit = 0;//卡车允许卸料
-    CarMoveCmd = 0;//卡车移动指令
-    GrabTotal = 0;//应放斗数
-    dTruckHead = 0.0;
-    dTruckTail = 0.0;
-    iCountY = 0;
-    iState = 1;
-    return 0;
+    // 初始化所有状态参数 (把所有工作状态标志都设回初始值)
+    CraneState = 0;    // 卸船机状态：比如 0 代表空闲
+    HopPos = 0;        // 抓斗位置
+    GrabNum = 0;       // 已抓取次数清零
+    HearBeat = 0;      // 心跳信号 (用来确认设备是否在线)
+    Fault = 1;         // 故障状态 (假设一开始可能有问题，需要检查)
+    Pause = 0;         // 暂停状态 (默认不暂停)
+    TruckHave = 0;     // 默认没有卡车
+    UnloadPermit = 0;  // 默认不允许卸货
+    CarMoveCmd = 0;    // 默认没有车辆移动指令
+    GrabTotal = 0;     // 总抓取次数清零
+    dTruckHead = 0.0;  // 卡车头位置清零
+    dTruckTail = 0.0;  // 卡车尾位置清零
+    iCountY = 0;       // 一个计数器清零
+    iState = 1;        // 设备内部状态标志
+    return 0;          // 返回0表示初始化成功
 }
 
-int Crane::ReadPLC() 
+//从 PLC 读取数据的成员函数。读取 PLC 知道的关于物理卸船机的最新状态信息，并做一些基本检查，确保信息是合理的。
+int Crane::ReadPLC()// 返回一个int类型值 (表示读取结果状态)
 {
-    unsigned char currData[21]{ 0 };//一级内的数据
-    if(plc.Connected())
-        plc.DBRead(1003, 0, 21, currData);
-    else
-    {        
-        if (plc.ConnectTo(ipPLC, 0, 1) == 0)
-            LOG(INFO) << "在读取PLC数据时，与PLC重新建立连接成功!" ;
-        else 
-            LOG(ERROR) << "在读取PLC数据时，与PLC通讯出现错误!";
-        return -1;
+    unsigned char currData[21]{ 0 };  // 定义一个局部unsigned char数组currData，大小为21字节，并初始化所有元素为0。这个数组用作临时缓冲区，存储从PLC读取的原始数据。准备一个“篮子”用来装从PLC读来的数据
+
+    // 读取PLC数据
+    if(plc.Connected()) { // 如果plc 对象和PLC连着
+        plc.DBRead(1003, 0, 21, currData); // 就去读PLC里地址1003开始的21个字节数据
+    }
+    else { // 如果没连上
+        // 尝试重新连接PLC
+        if (plc.ConnectTo(ipPLC, 0, 1) == 0) // ConnectTo成功返回0
+            LOG(INFO) << "PLC重新连接成功"; // 记录日志：连接成功
+        else
+            LOG(ERROR) << "PLC通信错误"; // 记录日志：连接失败
+        return -1; // 返回错误代码
     }
 
-    //CraneNo = currData[0];//卸船机号
-    CraneState = currData[1];//卸船机状态：0、无作业；1、卸船；2、装船
-    HopPos = currData[2];//料斗位置
-    GrabNum = currData[3];//已放料数量
-    HearBeat = currData[9] == 255 ? 1 : currData[9] + 1;//心跳信号
-    //Fault = currData[11];//故障
-    Pause = currData[11];//暂停
-    TruckHave = currData[12];//当前卸船机是否有卡车。0、无车；1、有车
-    GrabTotal = currData[13];//应放斗数
-    UnloadPermit = currData[14];//已放料数量
-    CarMoveCmd = currData[15];//已放料数量
+    //CraneNo = currData[0];//ж??????
+    // 解析PLC数据
+    CraneState = currData[1];  // 卸船机状态
+    HopPos = currData[2];      // 抓斗位置
+    GrabNum = currData[3];     // 已抓取次数
+    HearBeat = currData[9];    // 心跳信号
+    //Fault = currData[11];
+    Pause = currData[11];      // 暂停状态
+    TruckHave = currData[12];  // 是否有卡车
+    GrabTotal = currData[13];  // 总抓取次数
+    UnloadPermit = currData[14]; // 允许卸货
+    CarMoveCmd = currData[15];   // 车辆移动指令
     
-    iState = 2;
+    iState = 2; // 更新内部状态
 
-    if (currData[0] == 0 || currData[0] > 6 || currData[0] != CraneNo)
-    {          
+    // 状态检查 (对读到的数据做一些合理性检查)
+    if (currData[0] == 0 || currData[0] > 6 || currData[0] != CraneNo) // 检查PLC报告的卸船机编号 (currData[0]) 是否正确
+    {
         LOG(ERROR) << "卸船机的编号不正确";
-        closesocket(client);
-        return -2;
+        closesocket(client); // 出错了，关闭和扫描仪的连接
+        return -2; // 返回错误代码
     }          
+
+    // 状态检查2：检查卸船机状态
     if (CraneState > 2)
     {
         LOG(ERROR) << "卸船机的状态不正确";
         closesocket(client);
         return -3;
     }
+
+    // 状态检查3：检查抓斗位置上限
     if (HopPos > 3)
     {
-        LOG(ERROR) << "卸船机的料斗位置不正确";
+        LOG(ERROR) << "卸船机的抓斗位置不正确";
         closesocket(client);
         return -4;
     }
+
+    // 状态检查4：检查抓斗位置下限
     if (HopPos < 2)
     {
-        LOG(INFO) << "卸船机的料斗位置不在工作位";
+        LOG(INFO) << "卸船机的抓斗位置不在工作位";
         closesocket(client);
         return -5;
     }
-    return 1;
+
+    return 1;  // 所有检查通过,返回成功代码
 }
 
+// 定义 Crane 类的一个成员函数，名叫 ForkliftPause，这个函数没有返回值 (void)
 void Crane::ForkliftPause()
 {
+    // 1. 状态检查 (如果卸船机不在特定状态，就不需要检查叉车)
+    // 只有当 内部状态 iState 是 2 并且 卸船机状态 CraneState 也是 2 的时候，才继续检查。
     if (iState != 2 || CraneState != 2)
     {
-        Pause = 0;
-        return;
+        Pause = 0; // 不需要暂停
+        return;    // 直接结束这个检查
     }
 
-    HINSTANCE UHFReaderDll = LoadLibrary(L"UHFReader18.dll");
-    if (UHFReaderDll)
+    // 2. 加载RFID读取器动态库 (准备好和叉车RFID读取器“说话”的工具)（一个叫 UHFReader18.dll 的文件）
+    HINSTANCE UHFReaderDll = LoadLibrary(L"UHFReader18.dll"); // 加载工具库"UHFReader18.dll" 
+    if (UHFReaderDll) // 如果工具库加载成功
     {
+        // 3. 初始化变量，用于RFID读取器
         long frmcomportindex = 0;
-        unsigned char* EPC = new unsigned char[5000] { 0 };
-        long Totallen = 0;
+        unsigned char* EPC = new unsigned char[5000] { 0 }; // 申请一块能装5000个字符的“白板”(内存空间)，用来写从叉车读到的RFID标签信息(EPC)，并且先把白板擦干净(填0)
+        long Totallen = 0;  // 这个变量用来记录实际从叉车RFID读到的信息有多长
+
+        // 4. 获取动态库函数指针
         typedef long (WINAPI* Open)(int, const char*, unsigned char*, long*);
         Open OpenNetPort = (Open)GetProcAddress(UHFReaderDll, "OpenNetPort");
-        typedef long (WINAPI* Inventory)(unsigned char*, unsigned char, unsigned char, unsigned char, unsigned char*, long*, long*, long);
+        
+        typedef long (WINAPI* Inventory)(unsigned char*, unsigned char, unsigned char, 
+                                       unsigned char, unsigned char*, long*, long*, long);
         Inventory Inventory_G2 = (Inventory)GetProcAddress(UHFReaderDll, "Inventory_G2");
+        
         typedef long (WINAPI* Close)(long);
         Close CloseNetPort = (Close)GetProcAddress(UHFReaderDll, "CloseNetPort");
 
+        // 5. 连接RFID读取器
         if (OpenNetPort)
         {
             unsigned char fComAdr = 0xFF;
             OpenNetPort(6000, ipRFID, &fComAdr, &frmcomportindex);
             if (frmcomportindex != 0)
             {
+                // 6. 读取RFID标签
                 long CardNum = 0;
                 Inventory_G2(&fComAdr, 0, 0, 0, EPC, &Totallen, &CardNum, frmcomportindex);
+                
+                // 7. 处理读取结果
                 if (CardNum == 0)
                 {
-                    LOG(INFO) << "卸船机范围内没有车辆。";
-                    goto  CleanForklift;
+                    LOG(INFO) << "卸船机周围没有叉车";
+                    goto CleanForklift;
                 }
                 else if (CardNum == 1)
                 {
                     if (Totallen > 16 || Totallen < 1)
                     {
-                        LOG(ERROR) << "铲车的标识不正确。";
-                        goto  CleanForklift;
+                        LOG(ERROR) << "叉车的标识不正确";
+                        goto CleanForklift;
                     }
-                    LOG(INFO) << "卸船机范围内有车辆。" << EPC;
+                    LOG(INFO) << "卸船机周围有叉车，标识：" << EPC;
                 }
                 else
                 {
-                    LOG(INFO) << "卸船机范围内有多辆车。";
-                    goto  CleanForklift;
+                    LOG(INFO) << "卸船机周围有多辆叉车";
+                    goto CleanForklift;
                 }
             }
             else
             {
-                LOG(ERROR) << "连接铲车RFID设备失败。";
-                goto  CleanForklift;
+                LOG(ERROR) << "连接叉车RFID设备失败";
+                goto CleanForklift;
             }
 
-
+            // 8. 比较RFID标签是否发生变化
             for (int i = 0; i < Totallen; ++i)
             {
                 if (forkliftRFID[i] != EPC[i])
                 {
-                    //铲车已经换车了
-                    //从数据库中查询对应铲车的信息
+                    // 9. 查询数据库获取叉车信息
                     char c_Buff[35]{ 0 };
                     for (int i_RFID = 0; i_RFID < Totallen; ++i_RFID)
                         sprintf_s(c_Buff + i_RFID * 2, sizeof(c_Buff) - i_RFID * 2, "%02X", EPC[i_RFID]);
+                    
                     int CraneID = (int)CraneNo;
-                    LOG(INFO) << "卸船机号为：" << CraneID << "，铲车标识为：" << c_Buff;
+                    LOG(INFO) << "卸船机编号：" << CraneID << "，叉车标识为：" << c_Buff;
+                    
+                    // 10. 数据库操作
                     _ConnectionPtr conn = DB.GetCon();
                     try
                     {
+                        // 创建存储过程命令
                         _CommandPtr cmmdmy1;
-                        cmmdmy1.CreateInstance(__uuidof(Command));;
+                        cmmdmy1.CreateInstance(__uuidof(Command));
+
+                        // 设置存储过程参数
                         cmmdmy1->Parameters->Append(cmmdmy1->CreateParameter(_bstr_t("@CraneID"), adInteger, adParamInput, 4, CraneID));
                         cmmdmy1->Parameters->Append(cmmdmy1->CreateParameter(_bstr_t("@TruckID"), adVarChar, adParamInput, 30, c_Buff));
                         cmmdmy1->Parameters->Append(cmmdmy1->CreateParameter(_bstr_t("@GrabTotal"), adInteger, adParamOutput, 4));
@@ -210,59 +246,45 @@ void Crane::ForkliftPause()
                         cmmdmy1->Parameters->Append(cmmdmy1->CreateParameter(_bstr_t("@Location7"), adInteger, adParamOutput, 4));
                         cmmdmy1->Parameters->Append(cmmdmy1->CreateParameter(_bstr_t("@Location8"), adInteger, adParamOutput, 4));
                         cmmdmy1->Parameters->Append(cmmdmy1->CreateParameter(_bstr_t("@Location9"), adInteger, adParamOutput, 4));
-                        //cmmdmy1->Parameters->Append(cmmdmy1->CreateParameter(_bstr_t("@CoilID"), adVarChar, adParamOutput, 50));
 
-                        cmmdmy1->CommandText = _bstr_t("CheckTruckNo");//存储过程名
+                        // 执行存储过程、设置存储过程名称和执行类型
+                        cmmdmy1->CommandText = _bstr_t("CheckTruckNo");
                         cmmdmy1->ActiveConnection = conn;
                         cmmdmy1->CommandType = adCmdStoredProc;
-                        cmmdmy1->Execute(NULL, NULL, adCmdStoredProc);
+                        
+                        // 11. 处理结果
                         int iPause = cmmdmy1->Parameters->GetItem("@GrabTotal")->GetValue();
                         if (iPause == -1)
                         {
-                            Pause = 1;
+                            Pause = 1;  // 需要暂停
                             ::memset(forkliftRFID, 0, sizeof(forkliftRFID));
                             ::memcpy(forkliftRFID, EPC, Totallen);
                         }
                         else
                         {
-                            Pause = 0;
+                            Pause = 0;  // 不需要暂停
                             ::memset(forkliftRFID, 0, sizeof(forkliftRFID));
                         }
-
                     }
                     catch (...)
                     {
-                        LOG(ERROR) << "从数据库中读铲车信息出错:" << c_Buff;
-                        //Pause = 0;
-                        //::memset(forkliftRFID, 0, sizeof(forkliftRFID));
+                        LOG(ERROR) << "从数据库中读取叉车信息出错:" << c_Buff;
                     }
                     DB.ReleaseCon(conn);
                     break;
                 }
             }
-            goto  CleanForklift;
         }
         else
         {
-            LOG(ERROR) << "无法打开RFID识别库。";
+            LOG(ERROR) << "无法加载RFID识别器";
             Pause = 0;
             ::memset(forkliftRFID, 0, sizeof(forkliftRFID));
-            goto  CleanForklift;
         }
-
-    CleanForklift:
+        
+        // 12. 清理资源
         delete[] EPC;
-        if (CloseNetPort)
-        {
-            CloseNetPort(frmcomportindex);
-        }
         FreeLibrary(UHFReaderDll);
-    }
-    else
-    {
-        LOG(ERROR) << "载入RFID出错。";
-        Pause = 0;
-        ::memset(forkliftRFID, 0, sizeof(forkliftRFID));
     }
 }
 
@@ -277,14 +299,14 @@ int  Crane::Scan()
             i_res = GetXXWXTL302();
         else
         {
-            LOG(ERROR) << "卡车扫描雷达类型错误!";
+            LOG(ERROR) << "?????????????????!";
             return -19;
         }
 
         if (TruckHave == 1)
         {
             
-            LOG(INFO) << "车头在：" << dTruckHead << "，车尾在：" << dTruckTail << "；上次车头在：" << dLastHead << "，上次车尾在：" << dLastTail ;
+            LOG(INFO) << "??????" << dTruckHead << "????β???" << dTruckTail << "????γ?????" << dLastHead << "????γ?β???" << dLastTail ;
         }
         else
         {
@@ -332,7 +354,7 @@ int  Crane::Identify()
                         Inventory_G2(&fComAdr, 0, 0, 0, EPC, &Totallen, &CardNum, frmcomportindex);
                         if (CardNum == 0)
                         {
-                            LOG(ERROR) << "没有识别到卡车的标识。";
+                            LOG(ERROR) << "???????????????";
                             if (GrabTotal <= 0)
                                 iRes = -20;
                             goto  CleanRFID;
@@ -341,16 +363,16 @@ int  Crane::Identify()
                         {
                             if (Totallen > 16 || Totallen < 1)
                             {
-                                LOG(ERROR) << "卡车的标识不正确。";
+                                LOG(ERROR) << "???????????????";
                                 if (GrabTotal <= 0)
                                     iRes = -21;
                                 goto  CleanRFID;
                             }
-                            LOG(INFO) << "识别到卡车身份。" << EPC;
+                            LOG(INFO) << "???????????" << EPC;
                         }
                         else
                         {
-                            LOG(ERROR) << "卡车的周围有其它的车辆。";
+                            LOG(ERROR) << "????????Χ?????????????";
                             if (GrabTotal <= 0)
                                 iRes = -22;
                             goto  CleanRFID;
@@ -358,7 +380,7 @@ int  Crane::Identify()
                     }
                     else
                     {
-                        LOG(ERROR) << "连接RFID设备失败。";
+                        LOG(ERROR) << "????RFID?豸????";
                         if (GrabTotal <= 0)
                             iRes = -23;
                         goto  CleanRFID;
@@ -369,13 +391,13 @@ int  Crane::Identify()
                         if (truckRFID[i] != EPC[i] || GrabTotal <= 0)
                         {
                             ::memset(truckLocation, 0, sizeof(truckLocation));
-                            //卡车已经换车了
-                            //从数据库中查询对应卡车的信息以及每一抓的位置信息，将位置信息写入到truckLocation中
+                            //?????????????
+                            //????????в??????????????????????λ?????????λ?????д??truckLocation??
                             char c_Buff[35]{ 0 };
                             for (int i_RFID = 0; i_RFID < Totallen; ++i_RFID)
                                 sprintf_s(c_Buff + i_RFID * 2, sizeof(c_Buff) - i_RFID * 2, "%02X", EPC[i_RFID]);
                             int CraneID =(int) CraneNo;
-                            LOG(INFO) <<"卸船机号为："<< CraneID << "，卡车标识为：" << c_Buff ;
+                            LOG(INFO) <<"ж?????????"<< CraneID << "????????????" << c_Buff ;
                             _ConnectionPtr conn = DB.GetCon();
                             try
                             {
@@ -395,7 +417,7 @@ int  Crane::Identify()
                                 cmmdmy1->Parameters->Append(cmmdmy1->CreateParameter(_bstr_t("@Location9"), adInteger, adParamOutput, 4));
                                 //cmmdmy1->Parameters->Append(cmmdmy1->CreateParameter(_bstr_t("@CoilID"), adVarChar, adParamOutput, 50));
 
-                                cmmdmy1->CommandText = _bstr_t("CheckTruckNo");//存储过程名
+                                cmmdmy1->CommandText = _bstr_t("CheckTruckNo");//?洢??????
                                 cmmdmy1->ActiveConnection = conn;
                                 cmmdmy1->CommandType = adCmdStoredProc;
                                 cmmdmy1->Execute(NULL, NULL, adCmdStoredProc);
@@ -420,13 +442,13 @@ int  Crane::Identify()
                             }
                             catch (...)
                             {
-                                LOG(ERROR) << "写入数据库出错:" << c_Buff;
+                                LOG(ERROR) << "д??????????:" << c_Buff;
                                 if (GrabTotal <= 0)
                                     iRes = -26;
                                 
                             }
                             DB.ReleaseCon(conn);
-                            //将卡车的车号写入到数据库中
+                            //???????????д?????????
 
                             ::memset(truckRFID, 0, sizeof(truckRFID));
                             ::memcpy(truckRFID, EPC, Totallen);
@@ -436,7 +458,7 @@ int  Crane::Identify()
                 }
                 else
                 {
-                    LOG(ERROR) << "载入RFID识别库出错。";
+                    LOG(ERROR) << "????RFID?????????";
                     if (GrabTotal <= 0)
                         iRes = -24;
                     goto  CleanRFID;
@@ -452,7 +474,7 @@ int  Crane::Identify()
             }
             else
             {
-                LOG(ERROR) << "载入RFID出错。";
+                LOG(ERROR) << "????RFID??????";
                 if (GrabTotal <= 0)
                     iRes = -25;
             }
@@ -463,10 +485,10 @@ int  Crane::Identify()
             {
                 if (truckRFID[i] > 0)
                 {
-                    ///更新数据库将此卸船机的卡车信息清空
+                    ///???????????ж???????????????
                     
                     int CraneID = (int)CraneNo;
-                    LOG(INFO) << "卸船机号为：" << CraneID << "，卡车已经离开。";
+                    LOG(INFO) << "ж?????????" << CraneID << "?????????????";
                     _ConnectionPtr conn = DB.GetCon();
                     try
                     {
@@ -474,7 +496,7 @@ int  Crane::Identify()
                         cmmdmy1.CreateInstance(__uuidof(Command));;
                         cmmdmy1->Parameters->Append(cmmdmy1->CreateParameter(_bstr_t("@CraneID"), adInteger, adParamInput, 4, CraneID));
 
-                        cmmdmy1->CommandText = _bstr_t("CleanTruckNo");//存储过程名
+                        cmmdmy1->CommandText = _bstr_t("CleanTruckNo");//?洢??????
                         cmmdmy1->ActiveConnection = conn;
                         cmmdmy1->CommandType = adCmdStoredProc;
                         cmmdmy1->Execute(NULL, NULL, adCmdStoredProc);
@@ -482,13 +504,13 @@ int  Crane::Identify()
                     }
                     catch (...)
                     {
-                        LOG(ERROR) << "无卡车写入数据库出错。";
+                        LOG(ERROR) << "?????д????????????";
                         iRes = -26;
 
                     }
                     DB.ReleaseCon(conn);
                     ::memset(truckLocation, 0, sizeof(truckLocation));
-                    ::memset(truckRFID, 0, sizeof(truckRFID));//清空卡车信息
+                    ::memset(truckRFID, 0, sizeof(truckRFID));//?????????
                     break;
                 }
             }
@@ -544,13 +566,13 @@ int  Crane::Calculate()
                     //Fault = 0;
                     UnloadPermit = 0;
                     CarMoveCmd = 0;
-                    LOG(ERROR) << "已放数量过大。";
+                    LOG(ERROR) << "???????????";
                     return -31;
                 }
             }
             else
             {
-                LOG(ERROR) << "没有卡车装料的位置信息。";
+                LOG(ERROR) << "??п???????λ???????";
                 return -32;
             }
         }
@@ -584,10 +606,10 @@ int Crane::WritePLC()
         result[0] = HearBeat;
         result[1] = Fault;
         result[2] = Pause;
-        result[3] = TruckHave;//当前卸船机是否有卡车。0、无车；1、有车
-        result[4] = GrabTotal;//应放斗数
-        result[5] = UnloadPermit;//卡车允许卸料
-        result[6] = CarMoveCmd;//卡车移动指令
+        result[3] = TruckHave;//???ж????????п?????0???????1???г?
+        result[4] = GrabTotal;//??????
+        result[5] = UnloadPermit;//????????ж??
+        result[6] = CarMoveCmd;//??????????
 
         float f_temp = (float)dTruckTail;
         memcpy(result + 7, &f_temp, 4);
@@ -604,9 +626,9 @@ int Crane::WritePLC()
         else
         {
             if (plc.ConnectTo(ipPLC, 0, 1) == 0)
-                LOG(INFO) << "在写入PLC数据时，与PLC重新建立连接成功!";
+                LOG(INFO) << "??д??PLC?????????PLC?????????????!";
             else
-                LOG(ERROR) << "在写入PLC数据时，与PLC通讯出现错误!";
+                LOG(ERROR) << "??д??PLC?????????PLC?????????!";
             return -41;
         }
 
@@ -616,19 +638,20 @@ int Crane::WritePLC()
     }
     else 
     {
-        LOG(ERROR) << "系统有问题";
+        LOG(ERROR) << "????????";
         return -42;
     }
 }
 
 int Crane::ConnectScan()
 {
-    int iRes = -1;
+    int iRes = -1; // 默认返回失败
 
+    // 创建一个网络连接的“插座” (Socket)
     client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (client == INVALID_SOCKET)
+    if (client == INVALID_SOCKET) // 如果创建失败
     {
-        LOG(ERROR) << "创建WinSocket失败!";
+        LOG(ERROR) << "创建网络连接失败!";
         return iRes;
     }
 
@@ -641,49 +664,56 @@ int Crane::ConnectScan()
     lin_param.l_onoff = 1;
     lin_param.l_linger = 0;
     i_param = setsockopt(client, SOL_SOCKET, SO_LINGER, (const char*)&lin_param, sizeof(lin_param));
-    if (iScanType == 1)
+
+    // 根据扫描仪类型，执行不同的连接和初始化步骤
+    if (iScanType == 1) // SICK LMS511
     {
+        // 尝试连接到之前设置好的服务器地址和端口
         if (connect(client, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR)
         {
-            LOG(ERROR) << "连接SICKLMS511扫描仪失败!";
+            LOG(ERROR) << "连接 SICKLMS511 扫描仪失败!";
             return iRes;
         }
     }
-    else if (iScanType == 2)
+    else if (iScanType == 2) // XXWXTL302
     {
+        // 尝试连接
         if (connect(client, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR)
         {
-            LOG(ERROR) << "连接兴玄物联XT-L302失败!";
+            LOG(ERROR) << "连接 XXWXTL302 失败!";
             return iRes;
         }
-        char c_RecBuff[50]{ 0 };
-        unsigned char c_SendMode0[] = { 0xFE,0x00,0x00,0x01,0x00,0x78,0xF0 };
-        send(client, (const char*)c_SendMode0, sizeof(c_SendMode0), 0);
-        int i_RecLen = recv(client, c_RecBuff, sizeof(c_RecBuff), 0);
-        if (i_RecLen == 7 && c_RecBuff[1] == 1 && c_RecBuff[2] == 0 && c_RecBuff[3] == 1)
+        // 连接成功后，需要发送一个特定的指令，让它进入某种工作模式
+        char c_RecBuff[50]{ 0 }; // 准备接收回复的“篮子”
+        unsigned char c_SendMode0[] = { 0xFE,0x00,0x00,0x01,0x00,0x78,0xF0 }; // 要发送的指令数据
+        send(client, (const char*)c_SendMode0, sizeof(c_SendMode0), 0); // 发送指令
+        int i_RecLen = recv(client, c_RecBuff, sizeof(c_RecBuff), 0); // 等待并接收回复
+
+        // 检查回复是否符合预期
+        if (i_RecLen == 7 && c_RecBuff[1] == 1 && ...) // 如果回复正确
         {
-            if (c_RecBuff[4] == 0)
+            if (c_RecBuff[4] == 0) // 并且回复中的某个标志位是0
             {
-                cout << "扫描仪成功已经切换到测量状态。" << endl;
+                cout << "扫描仪成功切换到连续输出状态。" << endl; // 成功了
             }
-            else
+            else // 回复中的标志位不对
             {
-                LOG(ERROR) << "扫描仪切换到测量状态失败。";
-                closesocket(client);
+                LOG(ERROR) << "扫描仪切换状态失败。";
+                closesocket(client); // 关闭连接
                 return iRes;
             }
         }
-        else
+        else // 回复的数据不对或长度不对
         {
-            LOG(ERROR) << "兴玄物联XT-L302无法正常工作!";
-            closesocket(client);
+            LOG(ERROR) << "连接的 XT-L302 无有效响应!";
+            closesocket(client); // 关闭连接
             return iRes;
         }
     }
-    else
+    else // 未知的扫描仪类型
         return iRes;
 
-    return 0;
+    return 0; // 所有步骤都成功，返回0
 }
 
 int Crane::GetSICKLMS511()
@@ -699,15 +729,15 @@ int Crane::GetSICKLMS511()
     vector<string> data;
     int factors = 1;
     double startangle = 0.0;
-    //  '''角度分辨率'''
+    //  '''???????'''
     double ang = 0.0;
     double anglestep = 0.0;
-    // '''数据总量'''
+    // '''????????'''
     int datanum = 0;
     
     if (send(client, c_Sendscan, 17, 0) < 0)
     {
-        LOG(ERROR) << "向SICKLMS511发送查询指令失败!";
+        LOG(ERROR) << "??SICKLMS511????????????!";
         closesocket(client);
         iRes = ConnectScan();
         goto CleanSICKLMS511;
@@ -715,8 +745,8 @@ int Crane::GetSICKLMS511()
     i_RecLen = recv(client, c_RecBuff, MAX_BUFF_SIZE, 0);
     if (i_RecLen <= 0 || i_RecLen >= MAX_BUFF_SIZE - 1)
     { 
-        LOG(ERROR) << "SICKLMS511返回的数据不正常!";
-        Fault = 0;//有无故障。0：故障，1：正常
+        LOG(ERROR) << "SICKLMS511??????????????!";
+        Fault = 0;//????????0???????1??????
         goto CleanSICKLMS511;
     }
 
@@ -737,10 +767,10 @@ int Crane::GetSICKLMS511()
         factors = 2;
 
     startangle = stoi(data[23], nullptr, 16) / 10000.0;
-    //  '''角度分辨率'''
+    //  '''???????'''
     ang = stoi(data[24], nullptr, 16);
     anglestep = ang / 10000.0;
-    // '''数据总量'''
+    // '''????????'''
     datanum = stoi(data[25], nullptr, 16);
 
     for (int i = 0; i < datanum; ++i)
@@ -762,7 +792,7 @@ int Crane::GetSICKLMS511()
             ++iCountY;
         }
 
-        if (y > 2000.0 + (HopPos - 1) * 7500.0 && y < 2000.0 + HopPos * 7500.0) //判断头尾
+        if (y > 2000.0 + (HopPos - 1) * 7500.0 && y < 2000.0 + HopPos * 7500.0) //?ж??β
         {
             if (abs(dTruckHead - 0.0) > 0.1)
             {
@@ -792,8 +822,8 @@ int Crane::GetSICKLMS511()
 
     if (abs(dTruckTail - 0.0) < 0.1 && abs(dTruckHead - 0.0) < 0.1 && dLastHead > 3000.0 && dLastTail > 3000.0)
     {
-        //扫描仪发生了飘
-        LOG(ERROR) << "扫描仪出现了数据误差!";
+        //???????????
+        LOG(ERROR) << "?????????????????!";
         iRes = -15;
         goto CleanSICKLMS511;
 
@@ -801,27 +831,27 @@ int Crane::GetSICKLMS511()
 
     if (iCountY > 9)
     {
-        LOG(ERROR) << "卡车周围有其它车辆!";
+        LOG(ERROR) << "??????Χ??????????!";
         iRes = -16;
         goto CleanSICKLMS511;
     }
 
-    if (dTruckHead > 2000.0)//判断车辆是不是在扫描的范围内
+    if (dTruckHead > 2000.0)//?ж????????????????Χ??
     {
         if (dTruckTail > 29500.0)
         {
-            LOG(ERROR) << "卡车还没有完全进入到扫描区域!";
+            LOG(ERROR) << "???????????????????????!";
             iRes = -17;
             goto CleanSICKLMS511;
         }
 
         if (dTruckTail - dTruckHead > 10000 && dTruckTail - dTruckHead < 18000)
-            //判断为有车
+            //?ж???г?
 
             TruckHave = 1;
         else 
         {
-            LOG(ERROR) << "卡车前后有其它车辆!";
+            LOG(ERROR) << "?????????????????!";
             iRes = -18;
             goto CleanSICKLMS511;
         }
@@ -831,11 +861,11 @@ int Crane::GetSICKLMS511()
     {
         if (dTruckTail < 21000.0f)
         {
-            //判断为无车
+            //?ж?????
             TruckHave = 0;
             goto CleanSICKLMS511;
         }
-        LOG(ERROR) << "卡车前后有其它车辆!";
+        LOG(ERROR) << "?????????????????!";
         iRes = -18;
     }
 
@@ -859,7 +889,7 @@ int Crane::GetXXWXTL302()
     i_RecLen = send(client, (const char*)c_SendApply, sizeof(c_SendApply), 0);
     if (i_RecLen < 0)
     {
-        LOG(ERROR) << "向兴玄物联XT-L302发送查询指令失败!";
+        LOG(ERROR) << "??????????XT-L302????????????!";
         closesocket(client);
         iRes = ConnectScan();
         goto ReturnXXWXTL302;
@@ -871,8 +901,8 @@ int Crane::GetXXWXTL302()
 
         if (i_RecLen <= 1 || i_RecLen >= MAX_BUFF_SIZE - 1)
         {
-            LOG(ERROR) << "兴玄物联XT-L302返回的数据不正常!";
-            Fault = 0;//有无故障。0：故障，1：正常
+            LOG(ERROR) << "????????XT-L302??????????????!";
+            Fault = 0;//????????0???????1??????
             closesocket(client);
             iRes = ConnectScan();
             goto ReturnXXWXTL302;
@@ -920,7 +950,7 @@ int Crane::GetXXWXTL302()
                         ++iCountY;
                     }
 
-                    if (y > 2000.0 + (HopPos - 1) * 7500.0 && y < 2000.0 + HopPos * 7500.0) //判断头尾
+                    if (y > 2000.0 + (HopPos - 1) * 7500.0 && y < 2000.0 + HopPos * 7500.0) //?ж??β
                     {
                         if (abs(dTruckHead - 0.0) > 0.1)
                         {
@@ -955,8 +985,8 @@ int Crane::GetXXWXTL302()
     
     if (abs(dTruckTail - 0.0) < 0.1 && abs(dTruckHead - 0.0) < 0.1 && dLastHead > 3000.0 && dLastTail > 3000.0)
     {
-        //扫描仪发生了飘
-        LOG(ERROR) << "扫描仪出现了数据误差!";
+        //???????????
+        LOG(ERROR) << "?????????????????!";
         iRes = -15;
         goto ReturnXXWXTL302;
 
@@ -964,28 +994,28 @@ int Crane::GetXXWXTL302()
 
     if (iCountY > 9)
     {
-        LOG(ERROR) << "卡车周围有其它车辆!";
+        LOG(ERROR) << "??????Χ??????????!";
         iRes = -16;
         goto ReturnXXWXTL302;
     }
 
 
-    if (dTruckHead > 2000.0)//判断车辆是不是在扫描的范围内
+    if (dTruckHead > 2000.0)//?ж????????????????Χ??
     {
         if (dTruckTail > 29500.0)
         {
-            LOG(ERROR) << "卡车还没有完全进入到扫描区域!";
+            LOG(ERROR) << "???????????????????????!";
             iRes = -17;
             goto ReturnXXWXTL302;
         }
 
         if (dTruckTail - dTruckHead > 9000 && dTruckTail - dTruckHead < 18000)
-            //判断为有车
+            //?ж???г?
 
             TruckHave = 1;
         else
         {
-            LOG(ERROR) << "卡车前后有其它车辆!";
+            LOG(ERROR) << "?????????????????!";
             iRes = -18;
             goto ReturnXXWXTL302;
         }
@@ -995,11 +1025,11 @@ int Crane::GetXXWXTL302()
     {
         if (dTruckTail < 21000.0f)
         {
-            //判断为无车
+            //?ж?????
             TruckHave = 0;
             goto ReturnXXWXTL302;
         }
-        LOG(ERROR) << "卡车前后有其它车辆!";
+        LOG(ERROR) << "?????????????????!";
         iRes = -18;
     }
 
